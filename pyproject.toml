@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitdrip"
-version = "0.1.0"
-description = "Queue finished code and push it to GitHub in daily batches for consistent activity"
+version = "0.2.0"
+description = "Queue finished code or let AI agents build it day by day - daily pushes, plans, validation, reports, even with your laptop off"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "MariaZaidi-code" }]
-keywords = ["git", "github", "automation", "activity", "scheduler"]
+keywords = ["git", "github", "ai-agents", "automation", "actions", "activity"]
 classifiers = [
     "Environment :: Console",
     "Operating System :: Microsoft :: Windows",
@@ -18,8 +18,17 @@ classifiers = [
     "Topic :: Software Development :: Version Control :: Git",
 ]
 
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
+pdf = ["pypdf>=4"]
+deploy = ["pynacl>=1.5"]
+all = ["fastapi>=0.110", "uvicorn>=0.27", "pypdf>=4", "pynacl>=1.5"]
+
 [project.scripts]
 gitdrip = "gitdrip.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["gitdrip*"]
+
+[tool.setuptools.package-data]
+gitdrip = ["static/*.html"]

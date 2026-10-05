@@ -58,13 +58,25 @@ def _ensure_gitignore(target: Path, project: Path) -> None:
     except ValueError:
         return
     path = target / ".gitignore"
-    content = path.read_text(encoding="utf-8") if path.is_file() else ""
-    if any(line.strip() == ".gitdrip/" for line in content.splitlines()):
-        return
-    if content and not content.endswith("\n"):
-        content += "\n"
-    content += ".gitdrip/\n"
-    path.write_text(content, encoding="utf-8")
+    original = path.read_text(encoding="utf-8") if path.is_file() else ""
+    lines = [ln for ln in original.splitlines() if ln.strip() != ".gitdrip/"]
+    content = "\n".join(lines)
+    required = [
+        ".gitdrip/*",
+        "!.gitdrip/plan.json",
+        "!.gitdrip/plan_state.json",
+        "!.gitdrip/project-doc.md",
+        "!.gitdrip/settings.json",
+        "!.gitdrip/reports/",
+    ]
+    existing = {line.strip() for line in lines}
+    missing = [line for line in required if line not in existing]
+    if missing:
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += "\n".join(missing) + "\n"
+    if content != original:
+        path.write_text(content, encoding="utf-8")
 
 
 def _cmd_stage(args: argparse.Namespace) -> int:
@@ -152,6 +164,63 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_plan(args: argparse.Namespace) -> int:
+    from gitdrip.llm import client_for, load_secrets, load_settings
+    from gitdrip.plan import make_plan
+
+    project = find_project(args.project)
+    client = client_for(project, load_settings(project), load_secrets(project))
+    plan = make_plan(project, client, args.days)
+    print(f"plan ready: {plan['title']} ({len(plan['days'])} days, provider: {plan['provider']})")
+    if plan.get("warning"):
+        print(f"warning: {plan['warning']}")
+    for day in plan["days"]:
+        print(f"  day {day['day']:2d}: {day['phase']}")
+    print("next: gitdrip agent-run   (or open the dashboard: gitdrip web)")
+    return 0
+
+
+def _cmd_agent_run(args: argparse.Namespace) -> int:
+    import json
+
+    from gitdrip.agents import run_day
+
+    project = find_project(args.project)
+    result = run_day(project, day=args.day, force=args.force)
+    print(json.dumps({k: v for k, v in result.items() if k != "report"}, indent=2))
+    if result.get("report_path"):
+        print(f"report: {result['report_path']}")
+    return 1 if result.get("status") == "blocked" else 0
+
+
+def _cmd_cloud_run(args: argparse.Namespace) -> int:
+    import json
+
+    from gitdrip.agents import run_day
+
+    project = find_project(args.project)
+    result = run_day(project)
+    print(json.dumps(result, indent=2)[:8000])
+    return 1 if result.get("status") == "blocked" else 0
+
+
+def _cmd_deploy(args: argparse.Namespace) -> int:
+    from gitdrip.cloud import deploy
+
+    project = find_project(args.project)
+    for message in deploy(project, sync_llm_key=args.sync_llm_key, sync_smtp=args.sync_smtp):
+        print(f"- {message}")
+    return 0
+
+
+def _cmd_web(args: argparse.Namespace) -> int:
+    from gitdrip.web import serve
+
+    project = find_project(args.project)
+    serve(project, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gitdrip",
@@ -205,6 +274,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project")
     p.add_argument("--run-now", action="store_true", help="push one batch before waiting")
     p.set_defaults(func=_cmd_daemon)
+
+    p = sub.add_parser("plan", help="read the document and build the day-by-day plan")
+    p.add_argument("days", type=int, help="number of days to spread the plan over")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_plan)
+
+    p = sub.add_parser("agent-run", help="implement, validate and report today's phase")
+    p.add_argument("--project")
+    p.add_argument("--day", type=int, help="run a specific plan day")
+    p.add_argument("--force", action="store_true", help="re-run a day that already completed")
+    p.set_defaults(func=_cmd_agent_run)
+
+    p = sub.add_parser("cloud-run", help="execute today's phase (used by GitHub Actions)")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_cloud_run)
+
+    p = sub.add_parser("deploy", help="arm the laptop-off GitHub Actions schedule")
+    p.add_argument("--project")
+    p.add_argument("--sync-llm-key", action="store_true", help="copy your LLM key to repo secrets")
+    p.add_argument("--sync-smtp", action="store_true", help="copy SMTP password to repo secrets")
+    p.set_defaults(func=_cmd_deploy)
+
+    p = sub.add_parser("web", help="open the local dashboard (frontend)")
+    p.add_argument("--project")
+    p.add_argument("--port", type=int, default=7788)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=_cmd_web)
 
     return parser
 
