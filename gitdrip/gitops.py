@@ -53,10 +53,20 @@ def has_upstream(repo: Path, remote: str, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def _identity_args(repo: Path) -> list[str]:
+    args: list[str] = []
+    if not git(repo, "config", "user.name", check=False).stdout.strip():
+        args += ["-c", "user.name=gitdrip"]
+    if not git(repo, "config", "user.email", check=False).stdout.strip():
+        args += ["-c", "user.email=gitdrip@users.noreply.github.com"]
+    return args
+
+
 def commit_paths(repo: Path, paths: list[str], message: str) -> tuple[bool, str]:
     git(repo, "add", "-A", "--", *paths)
     proc = git(
         repo,
+        *_identity_args(repo),
         "commit",
         "-m",
         message,
