@@ -28,6 +28,19 @@ ENV_KEYS = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+# Anonymous tier allows roughly one request every 15s; pace free calls to
+# stay inside the quota instead of tripping 402 rate-limit responses.
+FREE_MIN_INTERVAL = 16.0
+_free_last_call: float = 0.0
+
+
+def _pace_free() -> None:
+    global _free_last_call
+    wait = FREE_MIN_INTERVAL - (time.monotonic() - _free_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _free_last_call = time.monotonic()
+
 
 @dataclass
 class LLMConfig:
@@ -105,14 +118,53 @@ class LLMClient:
                 self._attempts.append(f"{tag} failed: {exc}")
         raise GitdripError("all LLM providers failed -> " + "; ".join(errors))
 
-    def _call(self, base: str, key: str, model: str, prompt: str, system: str, timeout: int) -> str:
+    def _call_free(self, prompt: str, system: str, timeout: int) -> str:
+        """Keyless free provider: POST chat API first, GET text API on 402."""
+        base = PRESETS["free"][0]
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        body = json.dumps({"model": model, "messages": messages, "temperature": 0.4}).encode("utf-8")
+        body = json.dumps({"model": PRESETS["free"][1], "messages": messages, "temperature": 0.4}).encode("utf-8")
+        _pace_free()
+        try:
+            return self._call_post(f"{base}/chat/completions", body, "", timeout)
+        except RuntimeError as exc:
+            if "HTTP 402" not in str(exc) and "HTTP 429" not in str(exc):
+                raise
+        return self._call_free_get(prompt, system, timeout)
+
+    def _call_free_get(self, prompt: str, system: str, timeout: int) -> str:
+        import random
+        import urllib.parse
+
+        base = PRESETS["free"][0]
+        last_error: Exception = RuntimeError("free GET transport failed")
+        for attempt in range(3):
+            _pace_free()
+            params = {"model": "openai", "seed": str(random.randint(1, 10**9))}
+            if system:
+                params["system"] = system[:2000]
+            url = f"{base}/{urllib.parse.quote(prompt[:8000])}?{urllib.parse.urlencode(params)}"
+            try:
+                req = urllib.request.Request(url, method="GET", headers={"User-Agent": "gitdrip"})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    text = resp.read().decode("utf-8", "replace").strip()
+                if text:
+                    return text
+                last_error = RuntimeError("empty reply from free provider")
+            except urllib.error.HTTPError as exc:
+                last_error = RuntimeError(f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}")
+                if exc.code in (401, 403, 404):
+                    break
+            except Exception as exc:
+                last_error = exc
+            time.sleep(20 * (attempt + 1))
+        raise last_error
+
+    def _call_post(self, url: str, body: bytes, key: str, timeout: int) -> str:
         req = urllib.request.Request(
-            f"{base}/chat/completions",
+            url,
             data=body,
             method="POST",
             headers={
@@ -141,6 +193,16 @@ class LLMClient:
                 last_error = exc
             time.sleep(3 * (attempt + 1))
         raise last_error or RuntimeError("unknown LLM error")
+
+    def _call(self, base: str, key: str, model: str, prompt: str, system: str, timeout: int) -> str:
+        if base.rstrip("/") == PRESETS["free"][0] and not key:
+            return self._call_free(prompt, system, timeout)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        body = json.dumps({"model": model, "messages": messages, "temperature": 0.4}).encode("utf-8")
+        return self._call_post(f"{base}/chat/completions", body, key, timeout)
 
 
 def _content_of(data: dict) -> str:
