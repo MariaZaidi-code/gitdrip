@@ -198,8 +198,23 @@ def _cmd_cloud_run(args: argparse.Namespace) -> int:
 
     from gitdrip.agents import run_day
 
-    project = find_project(args.project)
-    result = run_day(project)
+    project = Path(args.project).resolve() if args.project else Path.cwd()
+    while not (gitdrip_dir(project) / "plan.json").is_file():
+        if project.parent == project:
+            raise GitdripError("cloud-run: no .gitdrip/plan.json here (run 'gitdrip deploy' first)")
+        project = project.parent
+    try:
+        cfg = load_config(project)
+        cfg.target_repo = str(project)
+    except GitdripError:
+        branch = gitops.current_branch(project) or "main"
+        if branch == "HEAD":
+            branch = "main"
+        cfg = Config(
+            target_repo=str(project), remote="origin", branch=branch,
+            push_time="09:00", task_name="gitdrip",
+        )
+    result = run_day(project, cfg=cfg)
     print(json.dumps(result, indent=2)[:8000])
     return 1 if result.get("status") == "blocked" else 0
 

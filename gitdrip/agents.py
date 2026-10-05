@@ -228,8 +228,8 @@ def verdict_of(report_md: str, validation: list[dict], written: list[str]) -> st
     return "NEEDS_REVIEW" if written else "BLOCKED"
 
 
-def run_day(project: Path, day: int | None = None, force: bool = False) -> dict:
-    cfg = load_config(project)
+def run_day(project: Path, day: int | None = None, force: bool = False, cfg: Config | None = None) -> dict:
+    cfg = cfg or load_config(project)
     plan = load_plan(project)
     if not plan:
         raise GitdripError("no plan yet - create one from the document first")
