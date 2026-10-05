@@ -169,6 +169,7 @@ def implement_phase(client: LLMClient, phase: dict, context: str,
     prompt = base_prompt
     round_error: Exception | None = None
     small_mode = False
+    empty_rounds = 0
     for round_no in range(1, MAX_ROUNDS + 1):
         try:
             data, _ = _chat_json(client, prompt, system)
@@ -211,7 +212,24 @@ def implement_phase(client: LLMClient, phase: dict, context: str,
             except Exception as exc:
                 round_error = exc
                 break
-        if data.get("done") or not raw_files:
+        if data.get("done") and (batch or produced):
+            break
+        if not raw_files:
+            if produced:
+                break  # nothing new this round; keep what we have
+            # Empty reply while nothing was ever produced: model evasion,
+            # not completion. Demand the files.
+            empty_rounds += 1
+            if empty_rounds >= 3:
+                round_error = round_error or GitdripError("implementer returned no files")
+                break
+            prompt = (
+                f"{base_prompt}\n\nYour reply contained no files, but this phase requires "
+                f"implementation. Produce the needed files now (at most {MAX_FILES_PER_ROUND}), "
+                "with ONLY the JSON object exactly as specified."
+            )
+            continue
+        if data.get("done"):
             break
         remaining = sorted(set(produced))
         prompt = (
