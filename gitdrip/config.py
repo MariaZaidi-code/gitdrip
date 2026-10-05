@@ -47,7 +47,7 @@ def load_config(project: Path) -> Config:
     path = gitdrip_dir(project) / CONFIG_NAME
     if not path.is_file():
         raise GitdripError(f"missing config: {path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     return Config(**data)
 
 

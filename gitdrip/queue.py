@@ -40,7 +40,7 @@ def load_queue(project: Path) -> dict:
     path = queue_path(project)
     if not path.is_file():
         return {"version": 1, "next_id": 1, "batches": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def save_queue(project: Path, queue: dict) -> None:

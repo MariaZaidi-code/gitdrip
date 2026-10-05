@@ -209,7 +209,7 @@ def load_settings(project: Path) -> dict:
     path = gitdrip_dir(project) / "settings.json"
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def save_settings(project: Path, data: dict) -> None:
@@ -222,7 +222,7 @@ def load_secrets(project: Path) -> dict:
     path = gitdrip_dir(project) / "secrets.json"
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def save_secrets(project: Path, data: dict) -> None:

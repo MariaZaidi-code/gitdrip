@@ -67,13 +67,59 @@ def run_once(project: Path, cfg: Config, dry_run: bool = False, run_all: bool = 
     return results
 
 
-def run_scheduled(project: Path) -> int:
-    try:
-        from gitdrip.config import load_config
+def tick_lines(project: Path) -> list[str]:
+    """Daily entry point: run the next agent day when a plan exists, else the next batch."""
+    from gitdrip.llm import load_settings
+    from gitdrip.plan import plan_path
 
-        cfg = load_config(project)
-        run_once(project, cfg)
+    try:
+        _settings = load_settings(project)
+    except Exception:
+        _settings = {}
+    if _settings.get("paused"):
+        return ["project is paused (gitdrip resume to continue)"]
+
+    if plan_path(project).is_file():
+        from gitdrip.agents import run_day
+
+        result = run_day(project)
+        status = result.get("status", "?")
+        if status == "blocked":
+            note = result.get("error") or "implementation failed"
+            lines = [
+                f"agent day {result.get('day')}: BLOCKED - {note}",
+                f"report: {result.get('report_path', '')}",
+            ]
+        elif status in ("already_done", "complete"):
+            lines = [f"agent: {result.get('message', status)}"]
+        else:
+            files = result.get("files") or []
+            lines = [
+                f"agent day {result.get('day')}/{result.get('total')}: {status} - "
+                f"{len(files)} file(s) - {result.get('commit', '')}",
+                f"report: {result.get('report_path', '')}",
+            ]
+            if result.get("error"):
+                lines.append(f"note: {result['error'][:400]}")
+        for line in lines:
+            _log(project, f"TICK {line}")
+        return lines
+    from gitdrip.config import load_config
+
+    cfg = load_config(project)
+    return run_once(project, cfg)
+
+
+def tick(project: Path) -> int:
+    try:
+        for line in tick_lines(project):
+            print(line)
         return 0
     except Exception:
-        _log(project, "SCHEDULED RUN FAILED\n" + traceback.format_exc())
+        _log(project, "TICK FAILED\n" + traceback.format_exc())
+        print("gitdrip: daily run failed (see .gitdrip/run.log)")
         return 1
+
+
+def run_scheduled(project: Path) -> int:
+    return tick(project)

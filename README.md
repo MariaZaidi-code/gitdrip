@@ -50,6 +50,8 @@ For each day the pipeline is: **plan → implement → validate → output repor
 
 ### LLM providers
 
+LLM policy: the **free keyless endpoint** works with no key; paid providers (`openai`, `anthropic`, `gemini`, `groq`, `openrouter`, `custom`) run **only** with a user-entered API key (dashboard secret field or `*_API_KEY` env var). **No local LLMs.**
+
 No key required: the default `auto` chain uses whatever is available — your key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY` in the environment, or a key stored in the dashboard), then the **keyless free endpoint**, then a structural heuristic fallback. Set an explicit provider/model/base URL in the dashboard or `.gitdrip/settings.json`.
 
 ```bash
@@ -57,6 +59,27 @@ gitdrip agent-run                   # provider comes from settings.json / dashbo
 ```
 
 Set an explicit provider/model/base URL in the dashboard or `.gitdrip/settings.json` (`auto`, `free`, `heuristic`, `openai`, `anthropic`, `gemini`, `groq`, `openrouter`, `custom`).
+
+### Drip speed
+
+Days = speed. The Plan tab offers presets that just fill the days input: **Relaxed (10 days)**, **Steady (6)**, **Sprint (3)** — or type any 1–90. Fewer days means bigger phases per day; more days means smaller, safer commits.
+
+### Pause & approval modes
+
+- `gitdrip pause` / dashboard **Pause** sets `settings.paused=true`; the loop reports `PAUSED` and skips runs until `gitdrip resume` (or **Resume**).
+- `mode: auto` commits each finished day straight through. `mode: review` parks finished days in `plan_state.json: pending_approval` until you press **Approve** (`gitdrip approve` / `POST /api/approve`).
+
+### Requirement traceability + coverage
+
+The planner extracts stable `REQ-xxx` ids into `plan.json: requirements[]` (+ `architecture`, per-day `reqs[]`, `attempts[]`). Each day card shows its covered REQ ids, provider, commit SHA and any error in red; the plan header shows `Requirements: X done / Y partial / Z open` plus a progress bar and an attempts warning when the planner fell back. Missing/unknown ids surface in `coverage.missing` (`GET /api/status`).
+
+### Project memory
+
+Per-project notes live under `.gitdrip/` (see `docs/architecture.md`): the document snapshot, plan + state history, and reports are committed so cloud runs resume where the laptop left off. When `gitdrip/memory.py` is present the dashboard prefers its `coverage(project)` helper, otherwise it computes coverage from plan + state.
+
+### Agent log
+
+Structured events stream to `.gitdrip/agent-log.jsonl` (`{t, event, day, detail}`). The dashboard **Agent log** tab (or `GET /api/agent-log`, last 200 events) renders them as timestamped rows — handy when a day goes `BLOCKED` or waits for approval.
 
 ### Works while your laptop is off
 
@@ -74,7 +97,11 @@ The workflow runs daily on the configured cron (UTC), installs gitdrip from GitH
 | `gitdrip stage <paths>` | Batch mode: snapshot files into daily batches (`-m`, `-n`) |
 | `gitdrip run` | Batch mode: push the next batch now (`--dry-run`, `--all`) |
 | `gitdrip plan <days> [--doc FILE]` | Agent mode: build the phase plan from a document (re-run to rebuild) |
+| `gitdrip replan <days> [--doc FILE]` | Agent mode: rebuild the plan (alias for `plan`; keeps history unless reset) |
 | `gitdrip agent-run [--day N] [--force]` | Agent mode: run today's implement/validate/report cycle |
+| `gitdrip tick` | Daily entry point: next agent day if a plan exists, else next batch |
+| `gitdrip pause` / `gitdrip resume` | Suspend / resume the daily loop (`POST /api/pause`, `/api/resume`; dashboard Settings) |
+| `gitdrip approve` | Release a day waiting in review mode (`POST /api/approve`; dashboard Approve button) |
 | `gitdrip cloud-run` | What GitHub Actions executes daily (no args needed) |
 | `gitdrip deploy` | Push the daily workflow + plan to GitHub (laptop-off mode) |
 | `gitdrip web [--port 7788]` | Dashboard: upload, plan, run, reports, settings, deploy |
@@ -88,11 +115,12 @@ The workflow runs daily on the configured cron (UTC), installs gitdrip from GitH
 ```
 .gitdrip/
 ├── config.json       # target repo, remote, branch, push time, batch size (machine-local)
-├── settings.json     # LLM provider/model/base URL, email/SMTP config (committed)
+├── settings.json     # LLM provider/model/base URL, email/SMTP, paused, mode (committed)
 ├── secrets.json      # llm_key, smtp_password (never committed)
-├── plan.json         # day-by-day phases: tasks, validation, reasoning (committed)
-├── plan_state.json   # days_done, history, verdicts, SHAs (committed)
+├── plan.json         # requirements, architecture, day-by-day phases, reqs, attempts (committed)
+├── plan_state.json   # days_done, history, verdicts, SHAs, pending_approval (committed)
 ├── project-doc.md    # the uploaded document snapshot (committed)
+├── agent-log.jsonl   # structured agent events {t, event, day, detail}
 ├── reports/          # day-1.md, day-2.md, ... (committed)
 ├── queue.json        # batch mode: pending/pushed batches
 ├── staged/           # batch mode: snapshots awaiting their push day

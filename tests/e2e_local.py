@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 import sys
@@ -87,14 +88,34 @@ def main() -> int:
     print("day1:", {k: result.get(k) for k in ("status", "day", "files", "commit", "delivery", "provider", "error")})
     print("validation:", result["validation"])
     assert result["day"] == 1
-    assert result["status"] in ("confirmed", "needs_review", "blocked"), result["status"]
+    assert result["status"] in ("confirmed", "needs_review"), \
+        f"day 1 did not complete (status={result['status']}): {result.get('error')}"
     assert Path(result["report_path"]).is_file(), "report missing"
 
     log = sh("git", "-C", str(root), "log", "--oneline")
     print("target log:\n" + log.stdout)
-    assert "drip day 1" in log.stdout, "day 1 commit missing"
+    assert re.search(r"(feat|fix|docs|test|chore)\(day 1\):", log.stdout), "day 1 commit missing"
     remote_log = sh("git", "-C", str(remote), "log", "--oneline", "main")
-    assert "drip day 1" in remote_log.stdout, "push missing"
+    assert re.search(r"(feat|fix|docs|test|chore)\(day 1\):", remote_log.stdout), "push missing"
+
+    # (a) secrets must never be tracked, even when the file exists
+    secrets_file = root / ".gitdrip" / "secrets.json"
+    if not secrets_file.is_file():
+        secrets_file.write_text('{"llm_key": "dummy"}', encoding="utf-8")
+    tracked = sh("git", "-C", str(root), "ls-files")
+    assert ".gitdrip/secrets.json" not in tracked.stdout.splitlines(), \
+        "secrets.json must not be tracked by git"
+
+    # (b) day commit message follows the conventional format.
+    full_msg = sh("git", "-C", str(root), "log", "--format=%B", "-n", "1").stdout
+    assert re.search(r"^(feat|fix|docs|test|chore)\(day \d+\): ", full_msg, re.MULTILINE) \
+        or "drip day 1" in full_msg, \
+        f"day commit message has unexpected format: {full_msg!r}"
+
+    # (c) status shows plan progress
+    st = sh("gitdrip", "status", "--project", str(root), check=False)
+    print("status cli:", (st.stdout or "").strip())
+    assert "plan" in (st.stdout or "").lower(), "status missing plan progress line"
 
     status = client.get("/api/status").json()
     assert status["plan"]["done"] == 1, status["plan"]

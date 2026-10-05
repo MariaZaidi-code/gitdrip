@@ -57,7 +57,10 @@
   .v-confirmed { background: rgba(63,185,80,.15); color: var(--accent); border: 1px solid rgba(63,185,80,.4); }
   .v-needs_review { background: rgba(210,153,34,.15); color: var(--warn); border: 1px solid rgba(210,153,34,.4); }
   .v-blocked { background: rgba(248,81,73,.15); color: var(--err); border: 1px solid rgba(248,81,73,.4); }
+  .v-needs_approval { background: rgba(210,153,34,.15); color: var(--warn); border: 1px solid rgba(210,153,34,.4); }
+  .v-paused { background: var(--chip); color: var(--warn); border: 1px solid var(--warn); }
   .v-pending { background: var(--chip); color: var(--muted); border: 1px solid var(--border); }
+  .err-text { color: var(--err); }
   .day .body { padding: 0 16px 16px 62px; font-size: 14px; }
   .day .body h4 { margin: 12px 0 6px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .6px; }
   .day .reasoning { color: var(--muted); font-style: italic; border-left: 3px solid var(--accent2); padding-left: 10px; }
@@ -76,6 +79,9 @@
   .md pre code { background: none; padding: 0; }
   .md li { margin: 3px 0; }
   .muted { color: var(--muted); }
+  .log-row { display: flex; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border); font-size: 13px; align-items: baseline; }
+  .log-row .t { color: var(--muted); font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
+  .log-row .ev { font-weight: 600; }
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -88,6 +94,7 @@
     <button data-tab="document">Document</button>
     <button data-tab="plan">Plan</button>
     <button data-tab="reports">Reports</button>
+    <button data-tab="agentlog">Agent log</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="deploy">Deploy</button>
   </nav>
@@ -148,10 +155,16 @@
     <div class="panel">
       <div class="row">
         <label>Days <input type="number" id="plan-days" value="7" min="1" max="90" style="width:80px"></label>
+        <button class="secondary" onclick="setDays(10)">Relaxed (10)</button>
+        <button class="secondary" onclick="setDays(6)">Steady (6)</button>
+        <button class="secondary" onclick="setDays(3)">Sprint (3)</button>
         <button class="primary" id="btn-plan" onclick="makePlan()">Generate plan</button>
         <button class="secondary" onclick="resetPlan()">Reset plan</button>
         <span class="muted" id="plan-info"></span>
       </div>
+      <div id="plan-coverage" class="muted"></div>
+      <div id="plan-attempts" class="muted"></div>
+      <div id="plan-progress"></div>
       <div id="plan-summary" class="muted"></div>
     </div>
     <div id="plan-timeline"></div>
@@ -166,9 +179,37 @@
     </div>
   </section>
 
+  <section id="tab-agentlog">
+    <h2>Agent log</h2>
+    <div class="sub">Last 200 structured events from <span class="mono">.gitdrip/agent-log.jsonl</span>.</div>
+    <div class="panel">
+      <div class="row">
+        <button class="secondary" onclick="loadAgentLog()">Refresh</button>
+        <span class="muted" id="agentlog-info"></span>
+      </div>
+      <div id="agentlog-list" class="muted">not loaded yet</div>
+    </div>
+  </section>
+
   <section id="tab-settings">
     <h2>Settings</h2>
     <div class="sub">Bring your own LLM key — otherwise the free provider continues automatically.</div>
+    <div class="panel">
+      <h2>Run control</h2>
+      <div class="sub">Pause the daily loop, pick approval mode, or approve a waiting day.</div>
+      <div class="row">
+        <button class="secondary" id="btn-pause" onclick="togglePause()">Pause</button>
+        <label>Mode
+          <select id="run-mode" onchange="saveMode()">
+            <option value="auto">auto</option>
+            <option value="review">review</option>
+          </select>
+        </label>
+        <button class="primary" id="btn-approve" style="display:none" onclick="approvePending()">Approve</button>
+        <span class="muted" id="runctl-status"></span>
+      </div>
+      <div class="msg" id="runctl-msg"></div>
+    </div>
     <div class="cols">
       <div class="panel">
         <h2>LLM provider</h2>
@@ -284,7 +325,8 @@ document.querySelectorAll('#nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'dashboard') loadStatus();
   if (b.dataset.tab === 'plan') loadPlan();
   if (b.dataset.tab === 'reports') loadReports();
-  if (b.dataset.tab === 'settings') loadConfig();
+  if (b.dataset.tab === 'agentlog') loadAgentLog();
+  if (b.dataset.tab === 'settings') { loadConfig(); loadControl(); }
   if (b.dataset.tab === 'document') loadDocMeta();
 });
 
@@ -295,7 +337,8 @@ async function loadStatus() {
   } catch (e) { toast(e.message, true); return; }
   const s = STATUS;
   $('dash-project').textContent = `${s.project} → ${s.target} (${s.branch} → ${s.remote})`;
-  $('hdr-provider').textContent = 'llm: ' + s.llm.provider + (s.llm.has_key ? ' · key ✓' : ' · free');
+  $('hdr-provider').textContent = 'llm: ' + s.llm.provider + (s.llm.has_key ? ' · key ✓' : ' · free')
+    + (s.paused ? ' · PAUSED' : '') + ' · ' + (s.mode || 'auto');
   const pct = s.plan.total ? Math.round(s.plan.done / s.plan.total * 100) : 0;
   const cards = [
     { label: 'Plan progress', value: `${s.plan.done} / ${s.plan.total} days`, hint: s.plan.exists ? s.plan.title : 'no plan yet', bar: pct },
@@ -310,7 +353,9 @@ async function loadStatus() {
     <div class="hint">${esc(c.hint)}</div>${c.bar !== undefined ? `<div class="bar"><i style="width:${c.bar}%"></i></div>` : ''}</div>`).join('');
   $('sched-time').value = s.push_time;
   $('sched-status').textContent = s.schedule;
-  $('run-hint').textContent = s.plan.exists
+  $('run-hint').textContent = s.paused
+    ? 'paused — resume in Settings to run again'
+    : s.plan.exists
     ? (s.plan.done >= s.plan.total ? 'plan complete — all days done' : `next: day ${s.plan.done + 1}`)
     : 'upload a document and generate a plan first';
 }
@@ -402,15 +447,46 @@ async function saveTextDoc() {
 }
 
 /* ---------- plan ---------- */
+function setDays(n) { $('plan-days').value = n; }
+function verdictClass(v) {
+  v = String(v || 'pending').toLowerCase();
+  if (v === 'pushed' || v === 'confirmed') return 'verdict v-confirmed';
+  if (v === 'needs_review') return 'verdict v-needs_review';
+  if (v === 'blocked') return 'verdict v-blocked';
+  if (v === 'needs_approval') return 'verdict v-needs_approval';
+  if (v === 'paused') return 'verdict v-paused';
+  return 'verdict v-pending';
+}
+function dayReqs(d) {
+  for (const k of ['reqs', 'requirements', 'covers', 'covered', 'req_ids', 'reqIds']) {
+    const v = d[k];
+    if (v && v.length) return (Array.isArray(v) ? v : [v]).map(x => (x && typeof x === 'object' ? x.id : x)).filter(Boolean);
+  }
+  return [];
+}
 async function loadPlan() {
   try {
     const data = await api('/api/plan');
-    renderPlan(data.plan, data.state);
+    let st = null;
+    try { st = await api('/api/status'); STATUS = st; } catch (e) {}
+    renderPlan(data.plan, data.state, st);
   } catch (e) { toast(e.message, true); }
 }
-function renderPlan(plan, state) {
+function renderPlan(plan, state, st) {
   const done = (state && state.days_done) || 0;
   const history = (state && state.history) || [];
+  const cov = st && st.coverage;
+  if (cov) {
+    $('plan-coverage').textContent = `Requirements: ${cov.done} done / ${cov.partial} partial / ${cov.open} open${cov.total ? ` (of ${cov.total})` : ''}`;
+  } else { $('plan-coverage').textContent = ''; }
+  if (plan && plan.attempts && plan.attempts.length) {
+    $('plan-attempts').innerHTML = '<span style="color:var(--warn)">Attempts: ' + esc([].concat(plan.attempts).join(' | ')) + '</span>';
+  } else { $('plan-attempts').textContent = ''; }
+  const total = (plan && plan.days && plan.days.length) || 0;
+  const pct = (st && st.progress) ? st.progress.pct : (total ? Math.round(done / total * 100) : 0);
+  $('plan-progress').innerHTML = total
+    ? `<div class="muted">${done} / ${total} days done</div><div class="bar"><i style="width:${pct}%"></i></div>`
+    : '';
   if (!plan) {
     $('plan-timeline').innerHTML = '';
     $('plan-summary').textContent = 'no plan yet — upload a document and generate one.';
@@ -421,19 +497,21 @@ function renderPlan(plan, state) {
   $('plan-summary').innerHTML = `<b>${esc(plan.title)}</b><br>${esc(plan.summary || '')}${plan.warning ? '<br><span style="color:var(--warn)">' + esc(plan.warning) + '</span>' : ''}`;
   $('plan-timeline').innerHTML = plan.days.map(d => {
     const h = history.find(x => x.day === d.day);
-    const verdict = h ? h.verdict.toLowerCase() : 'pending';
-    const cls = 'verdict v-' + (verdict === 'pushed' || verdict === 'confirmed' ? 'confirmed' : verdict === 'pending' ? 'pending' : verdict);
+    const cls = verdictClass(h && h.verdict);
+    const reqs = dayReqs(d);
     return `<details class="day"><summary>
         <span class="num">D${d.day}</span><span class="phase">${esc(d.phase)}</span>
-        <span class="verdict ${cls}">${esc((h && h.verdict) || 'PENDING')}</span></summary>
+        <span class="${cls}">${esc((h && h.verdict) || 'PENDING')}</span></summary>
       <div class="body">
         ${d.reasoning ? `<h4>Reasoning</h4><div class="reasoning">${esc(d.reasoning)}</div>` : ''}
         ${d.goal ? `<h4>Goal</h4><div>${esc(d.goal)}</div>` : ''}
         ${d.tasks && d.tasks.length ? `<h4>Tasks</h4><ul>${d.tasks.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
         ${d.files && d.files.length ? `<h4>Target files</h4>${d.files.map(f => `<span class="chip">${esc(f)}</span>`).join('')}` : ''}
         ${d.validation && d.validation.length ? `<h4>Validation</h4>${d.validation.map(c => `<span class="chip">${esc(c)}</span>`).join('')}` : ''}
+        ${reqs.length ? `<h4>Requirements</h4>${reqs.map(r => `<span class="chip">${esc(r)}</span>`).join('')}` : ''}
         ${d.report_expectation ? `<h4>Report must confirm</h4><div class="muted">${esc(d.report_expectation)}</div>` : ''}
-        ${h ? `<h4>Outcome</h4><div class="muted">${esc(h.time || '')} · provider ${esc(h.provider || '')} · ${(h.files || []).length} files</div>` : ''}
+        ${h ? `<h4>Outcome</h4><div class="muted">${esc(h.time || '')} · provider ${esc(h.provider || '—')} · ${(h.files || []).length} files${h.sha ? ' · sha ' + esc(h.sha) : ''}</div>`
+          + (h.error ? `<div class="err-text">error: ${esc(h.error)}</div>` : '') : ''}
       </div></details>`;
   }).join('');
 }
@@ -462,7 +540,7 @@ async function loadReports() {
     $('report-list').innerHTML = data.reports.map(r =>
       `<div class="row" style="justify-content:space-between; border-bottom:1px solid var(--border); padding:10px 4px; margin:0; cursor:pointer" onclick="showReport(${r.day})">
         <span><b>Day ${r.day}</b> — ${esc(r.phase)}</span>
-        <span class="verdict v-${r.verdict.toLowerCase()}">${esc(r.verdict)}</span></div>`).join('');
+        <span class="${verdictClass(r.verdict)}">${esc(r.verdict)}</span></div>`).join('');
   } catch (e) { toast(e.message, true); }
 }
 async function showReport(day) {
@@ -533,6 +611,60 @@ async function testEmail() {
   try { await api('/api/test-email', { method: 'POST', body: {} }); msg($('em-msg'), 'test email sent', false); }
   catch (e) { msg($('em-msg'), e.message, true); }
   busy(btn, false);
+}
+
+/* ---------- run control ---------- */
+async function loadControl() {
+  try {
+    const s = await api('/api/status');
+    STATUS = s;
+    $('btn-pause').textContent = s.paused ? 'Resume' : 'Pause';
+    $('run-mode').value = s.mode || 'auto';
+    $('runctl-status').textContent = (s.paused ? 'paused' : 'running') + ' · mode ' + (s.mode || 'auto');
+    const btn = $('btn-approve');
+    if (s.pending_approval) {
+      btn.style.display = '';
+      btn.textContent = 'Approve day ' + (s.pending_approval.day || '');
+    } else { btn.style.display = 'none'; }
+  } catch (e) { toast(e.message, true); }
+}
+async function togglePause() {
+  try {
+    const s = STATUS || await api('/api/status');
+    const path = s.paused ? '/api/resume' : '/api/pause';
+    const d = await api(path, { method: 'POST', body: {} });
+    STATUS = { ...s, paused: d.paused };
+    msg($('runctl-msg'), d.paused ? 'paused — daily loop will skip runs' : 'resumed', false);
+    loadControl(); loadStatus();
+  } catch (e) { msg($('runctl-msg'), e.message, true); }
+}
+async function saveMode() {
+  try {
+    await api('/api/config', { method: 'POST', body: { mode: $('run-mode').value } });
+    msg($('runctl-msg'), 'mode saved: ' + $('run-mode').value, false);
+    loadStatus();
+  } catch (e) { msg($('runctl-msg'), e.message, true); }
+}
+async function approvePending() {
+  try {
+    const d = await api('/api/approve', { method: 'POST', body: {} });
+    msg($('runctl-msg'), 'approved: ' + (d.summary || 'ok'), false);
+    toast('approved');
+    loadControl(); loadStatus(); loadPlan();
+  } catch (e) { msg($('runctl-msg'), e.message, true); toast(e.message, true); }
+}
+
+/* ---------- agent log ---------- */
+async function loadAgentLog() {
+  try {
+    const data = await api('/api/agent-log');
+    const evs = data.events || [];
+    $('agentlog-info').textContent = evs.length ? `${evs.length} event(s)` : 'no events yet';
+    $('agentlog-list').innerHTML = evs.length ? evs.map(e =>
+      `<div class="log-row"><span class="t">${esc(e.t || '')}</span><span class="ev">${esc(e.event || '')}</span>`
+      + `<span class="muted">${e.day !== undefined ? 'day ' + esc(e.day) : ''}</span>`
+      + `<span>${esc(e.detail || '')}</span></div>`).join('') : '<div class="muted">no events yet</div>';
+  } catch (e) { toast(e.message, true); }
 }
 
 /* ---------- deploy ---------- */

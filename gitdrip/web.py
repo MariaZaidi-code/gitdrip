@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import webbrowser
 from pathlib import Path
 
@@ -31,6 +32,118 @@ from gitdrip.runner import run_once
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+AGENT_LOG_NAME = "agent-log.jsonl"
+
+
+def _read_agent_log(project: Path, limit: int = 200) -> list:
+    path = gitdrip_dir(project) / AGENT_LOG_NAME
+    if not path.is_file():
+        return []
+    events = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return events[-limit:]
+
+
+def _day_req_ids(day: dict) -> list[str]:
+    for key in ("reqs", "requirements", "covers", "covered", "req_ids", "reqIds"):
+        value = day.get(key)
+        if not value:
+            continue
+        ids: list[str] = []
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, dict):
+                rid = item.get("id", "")
+                if rid:
+                    ids.append(str(rid))
+            elif item:
+                ids.append(str(item))
+        if ids:
+            return ids
+    return []
+
+
+def _coverage_fallback(plan: dict | None, state: dict) -> dict:
+    try:
+        from gitdrip.memory import coverage as _mem_coverage  # type: ignore
+        # memory.coverage may expect a project path; try plan/state-agnostic call
+        # only when it accepts no usable args — otherwise fall through to local compute.
+        raise ImportError
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    plan = plan or {}
+    raw_reqs = plan.get("requirements") or []
+    req_ids: list[str] = []
+    for item in raw_reqs if isinstance(raw_reqs, list) else []:
+        if isinstance(item, dict) and item.get("id"):
+            req_ids.append(str(item["id"]))
+        elif isinstance(item, str) and item.strip():
+            req_ids.append(item.strip())
+    days = plan.get("days") or []
+    cover_map: dict[str, list[int]] = {}
+    for day in days if isinstance(days, list) else []:
+        if not isinstance(day, dict):
+            continue
+        for rid in _day_req_ids(day):
+            cover_map.setdefault(rid, []).append(day.get("day"))
+    if not req_ids:
+        # no top-level requirements: derive universe from per-day refs
+        req_ids = sorted(cover_map)
+    history = state.get("history", []) if isinstance(state, dict) else []
+    by_day = {h.get("day"): h for h in history if isinstance(h, dict)}
+    done = partial = open_n = 0
+    for rid in req_ids:
+        covering = cover_map.get(rid, [])
+        verdicts = [str((by_day.get(d) or {}).get("verdict", "")).upper() for d in covering]
+        if any(v == "CONFIRMED" for v in verdicts):
+            done += 1
+        elif any(v == "NEEDS_REVIEW" for v in verdicts):
+            partial += 1
+        else:
+            open_n += 1
+    defined = set(req_ids)
+    missing = sorted([rid for rid in req_ids if rid not in cover_map]) if plan.get("requirements") else []
+    # also surface day refs pointing at unknown requirement ids
+    if defined and plan.get("requirements"):
+        unknown = sorted(set(cover_map) - defined)
+        missing = sorted(set(missing) | set(unknown)) if unknown else missing
+    return {"total": len(req_ids), "done": done, "partial": partial, "open": open_n, "missing": missing}
+
+
+def _compute_coverage(project: Path, plan: dict | None, state: dict) -> dict:
+    try:
+        from gitdrip.memory import coverage as mem_coverage  # type: ignore
+
+        try:
+            result = mem_coverage(project)
+        except TypeError:
+            result = mem_coverage(plan, state)  # type: ignore
+        if isinstance(result, dict) and "total" in result:
+            return {
+                "total": int(result.get("total", 0)),
+                "done": int(result.get("done", 0)),
+                "partial": int(result.get("partial", 0)),
+                "open": int(result.get("open", 0)),
+                "missing": list(result.get("missing", [])),
+            }
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return _coverage_fallback(plan, state)
+
 
 def create_app(project: Path):
     from fastapi import FastAPI
@@ -59,6 +172,9 @@ def create_app(project: Path):
         target = Path(cfg.target_repo)
         llm = settings.get("llm", {})
         email = settings.get("email", {})
+        total_days = len((plan or {}).get("days", []))
+        days_done = state.get("days_done", 0)
+        pct = round(days_done / total_days * 100) if total_days else 0
         return ok(
             project=str(project),
             target=str(target),
@@ -66,6 +182,11 @@ def create_app(project: Path):
             remote=cfg.remote,
             push_time=cfg.push_time,
             batch_size=cfg.batch_size,
+            paused=bool(settings.get("paused", False)),
+            mode=str(settings.get("mode", "auto")),
+            progress={"done": days_done, "total": total_days, "pct": pct},
+            coverage=_compute_coverage(project, plan, state),
+            pending_approval=state.get("pending_approval"),
             queue={
                 "pending": len(pending_batches(queue)),
                 "completed": len(queue.get("batches", [])) - len(pending_batches(queue)),
@@ -120,6 +241,13 @@ def create_app(project: Path):
             cfg = load_config(project)
             cfg.push_time = settings["push_time"]
             save_config(project, cfg)
+        if "paused" in body:
+            settings["paused"] = bool(body["paused"])
+        if "mode" in body:
+            mode = str(body["mode"])
+            if mode not in ("auto", "review"):
+                return fail("mode must be 'auto' or 'review'")
+            settings["mode"] = mode
         save_settings(project, settings)
         return ok(settings=settings)
 
@@ -185,6 +313,34 @@ def create_app(project: Path):
         day = body.get("day")
         result = run_day(project, day=int(day) if day else None, force=bool(body.get("force")))
         return ok(result=result)
+
+    @app.get("/api/agent-log")
+    def agent_log():
+        return ok(events=_read_agent_log(project))
+
+    @app.post("/api/pause")
+    def pause():
+        settings = load_settings(project)
+        settings["paused"] = True
+        save_settings(project, settings)
+        return ok(paused=True)
+
+    @app.post("/api/resume")
+    def resume():
+        settings = load_settings(project)
+        settings["paused"] = False
+        save_settings(project, settings)
+        return ok(paused=False)
+
+    @app.post("/api/approve")
+    def approve():
+        from gitdrip.agents import approve_pending
+
+        try:
+            summary = approve_pending(project)
+        except GitdripError as exc:
+            return fail(str(exc), 409)
+        return ok(summary=summary)
 
     @app.get("/api/reports")
     def reports():

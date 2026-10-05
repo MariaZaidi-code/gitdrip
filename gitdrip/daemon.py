@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from gitdrip.config import load_config
-from gitdrip.runner import run_once
+from gitdrip.runner import tick_lines
 
 
 def next_run_time(push_time: str) -> dt.datetime:
@@ -28,17 +28,17 @@ def _sleep_until(target: dt.datetime) -> None:
 def daemon(project: Path, run_now: bool = False) -> int:
     cfg = load_config(project)
     if run_now:
-        for line in run_once(project, cfg):
+        for line in tick_lines(project):
             print(line)
     while True:
         cfg = load_config(project)
         target = next_run_time(cfg.push_time)
-        print(f"gitdrip daemon: next push at {target:%Y-%m-%d %H:%M} (ctrl+c to stop)")
+        print(f"gitdrip daemon: next run at {target:%Y-%m-%d %H:%M} (ctrl+c to stop)")
         _sleep_until(target)
-        print(f"gitdrip daemon: pushing batch at {dt.datetime.now():%H:%M}")
+        print(f"gitdrip daemon: daily run at {dt.datetime.now():%H:%M}")
         try:
-            for line in run_once(project, cfg):
+            for line in tick_lines(project):
                 print(line)
         except Exception as exc:
-            print(f"gitdrip daemon: push failed: {exc}")
+            print(f"gitdrip daemon: run failed: {exc}")
             time.sleep(60)

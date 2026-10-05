@@ -21,8 +21,8 @@ def _schtasks(*args: str) -> subprocess.CompletedProcess:
 def _task_command(project: Path) -> tuple[str, str]:
     exe = shutil.which("gitdrip")
     if exe:
-        return exe, f'run --scheduled --project "{project}"'
-    return sys.executable, f'-m gitdrip run --scheduled --project "{project}"'
+        return exe, f'tick --project "{project}"'
+    return sys.executable, f'-m gitdrip tick --project "{project}"'
 
 
 def _task_xml(cfg: Config, project: Path, time: str) -> str:
@@ -56,7 +56,7 @@ def _task_xml(cfg: Config, project: Path, time: str) -> str:
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
     <Enabled>true</Enabled>
   </Settings>
   <Actions Context="Author">
@@ -72,7 +72,7 @@ def _task_xml(cfg: Config, project: Path, time: str) -> str:
 def schedule(cfg: Config, project: Path, time: str | None = None) -> str:
     push_time = time or cfg.push_time
     if not IS_WINDOWS:
-        cron = f"{push_time} * * * cd {project} && {sys.executable} -m gitdrip run --scheduled"
+        cron = f"{push_time} * * * cd {project} && {sys.executable} -m gitdrip tick --project {project}"
         return f"add this to crontab:\n  {cron}"
     xml = _task_xml(cfg, project, push_time)
     fd, xml_path = tempfile.mkstemp(suffix=".xml")

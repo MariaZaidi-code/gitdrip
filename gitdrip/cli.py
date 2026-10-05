@@ -67,6 +67,7 @@ def _ensure_gitignore(target: Path, project: Path) -> None:
         "!.gitdrip/plan_state.json",
         "!.gitdrip/project-doc.md",
         "!.gitdrip/settings.json",
+        "!.gitdrip/memory.json",
         "!.gitdrip/reports/",
     ]
     existing = {line.strip() for line in lines}
@@ -101,6 +102,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tick(args: argparse.Namespace) -> int:
+    from gitdrip.runner import tick
+
+    return tick(find_project(args.project))
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     project = find_project(args.project)
     cfg = load_config(project)
@@ -114,6 +121,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"batch size  : {cfg.batch_size}")
     print(f"scheduler   : {scheduler.schedule_status(cfg)}")
     print(f"queue       : {len(pending)} pending, {len(done)} completed")
+    from gitdrip.plan import load_plan, load_state, plan_path
+
+    if plan_path(project).is_file():
+        plan = load_plan(project)
+        state = load_state(project)
+        if plan:
+            print(f"plan        : {plan.get('title', '')} - day {state.get('days_done', 0)}/{len(plan['days'])} done")
     for batch in pending[:5]:
         print(f"  next batch {batch.id}: {len(batch.files)} file(s) - {batch.message}")
     if len(pending) > 5:
@@ -178,8 +192,13 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     client = client_for(project, load_settings(project), load_secrets(project))
     plan = make_plan(project, client, args.days, doc=doc)
     print(f"plan ready: {plan['title']} ({len(plan['days'])} days, provider: {plan['provider']})")
+    if plan.get("attempts"):
+        print(f"fallbacks: {' ; '.join(plan['attempts'])[:500]}")
     if plan.get("warning"):
         print(f"warning: {plan['warning']}")
+    reqs = plan.get("requirements") or []
+    if reqs:
+        print(f"requirements: {len(reqs)} tracked ({', '.join(r.get('id', '?') for r in reqs[:8])}{'...' if len(reqs) > 8 else ''})")
     for day in plan["days"]:
         print(f"  day {day['day']:2d}: {day['phase']}")
     print("next: gitdrip agent-run   (or open the dashboard: gitdrip web)")
@@ -197,6 +216,48 @@ def _cmd_agent_run(args: argparse.Namespace) -> int:
     if result.get("report_path"):
         print(f"report: {result['report_path']}")
     return 1 if result.get("status") == "blocked" else 0
+
+
+def _set_paused(project: Path, paused: bool) -> int:
+    from gitdrip.llm import load_settings, save_settings
+
+    settings = load_settings(project)
+    settings["paused"] = paused
+    save_settings(project, settings)
+    print("paused - daily runs will no-op until 'gitdrip resume'" if paused else "resumed - daily runs active")
+    return 0
+
+
+def _cmd_pause(args: argparse.Namespace) -> int:
+    return _set_paused(find_project(args.project), True)
+
+
+def _cmd_resume(args: argparse.Namespace) -> int:
+    return _set_paused(find_project(args.project), False)
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    import json
+
+    from gitdrip.agents import approve_pending
+
+    result = approve_pending(find_project(args.project))
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cmd_replan(args: argparse.Namespace) -> int:
+    from gitdrip.llm import client_for, load_secrets, load_settings
+    from gitdrip.plan import replan_remaining
+
+    project = find_project(args.project)
+    client = client_for(project, load_settings(project), load_secrets(project))
+    plan = replan_remaining(project, client, days=args.days, note=args.note or "")
+    state_days = len(plan["days"])
+    print(f"replanned: {plan['title']} ({state_days} days, provider: {plan['provider']})")
+    for day in plan["days"]:
+        print(f"  day {day['day']:2d}: {day['phase']}")
+    return 0
 
 
 def _cmd_cloud_run(args: argparse.Namespace) -> int:
@@ -273,6 +334,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_run)
 
+    p = sub.add_parser("tick", help="daily entry point: next agent day if a plan exists, else next batch")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_tick)
+
     p = sub.add_parser("status", help="show project, queue and schedule")
     p.add_argument("--project")
     p.set_defaults(func=_cmd_status)
@@ -282,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=_cmd_list)
 
-    p = sub.add_parser("schedule", help="register the daily scheduled push")
+    p = sub.add_parser("schedule", help="register the daily run (next agent day, or next batch)")
     p.add_argument("--project")
     p.add_argument("--time", help="override daily push time HH:MM")
     p.set_defaults(func=_cmd_schedule)
@@ -291,9 +356,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project")
     p.set_defaults(func=_cmd_unschedule)
 
-    p = sub.add_parser("daemon", help="stay running and push at the configured time")
+    p = sub.add_parser("daemon", help="stay running and fire at the configured time")
     p.add_argument("--project")
-    p.add_argument("--run-now", action="store_true", help="push one batch before waiting")
+    p.add_argument("--run-now", action="store_true", help="run once now, then wait for the schedule")
     p.set_defaults(func=_cmd_daemon)
 
     p = sub.add_parser("plan", help="read the document and build the day-by-day plan")
@@ -317,6 +382,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sync-llm-key", action="store_true", help="copy your LLM key to repo secrets")
     p.add_argument("--sync-smtp", action="store_true", help="copy SMTP password to repo secrets")
     p.set_defaults(func=_cmd_deploy)
+
+    p = sub.add_parser("pause", help="pause daily runs (tick, daemon, cloud)")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_pause)
+
+    p = sub.add_parser("resume", help="resume daily runs after a pause")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_resume)
+
+    p = sub.add_parser("approve", help="commit and push the day held for review")
+    p.add_argument("--project")
+    p.set_defaults(func=_cmd_approve)
+
+    p = sub.add_parser("replan", help="regenerate the remaining days from current progress")
+    p.add_argument("--project")
+    p.add_argument("--days", type=int, default=None, help="new count of remaining days (default: keep)")
+    p.add_argument("--note", default="", help="extra instruction for the replanner")
+    p.set_defaults(func=_cmd_replan)
 
     p = sub.add_parser("web", help="open the local dashboard (frontend)")
     p.add_argument("--project")

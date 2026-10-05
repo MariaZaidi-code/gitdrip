@@ -62,6 +62,22 @@ def _identity_args(repo: Path) -> list[str]:
     return args
 
 
+def commit_type_for(phase_text: str) -> str:
+    text = (phase_text or "").lower()
+    if any(k in text for k in ("fix", "bug", "error", "patch", "hotfix", "repair", "issue")):
+        return "fix"
+    if any(k in text for k in ("doc", "readme", "comment", "guide")):
+        return "docs"
+    if any(k in text for k in ("test", "coverage", "spec")):
+        return "test"
+    if any(k in text for k in (
+        "chore", "refactor", "cleanup", "clean", "dependenc", "bump",
+        "polish", "scaffold", "setup", "config", "ci", "build",
+    )):
+        return "chore"
+    return "feat"
+
+
 def commit_paths(repo: Path, paths: list[str], message: str) -> tuple[bool, str]:
     git(repo, "add", "-A", "--", *paths)
     proc = git(
