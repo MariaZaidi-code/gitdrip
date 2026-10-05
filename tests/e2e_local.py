@@ -4,7 +4,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+try:
+    from fastapi.testclient import TestClient
+except ImportError:
+    raise SystemExit("needs the web extra: pip install -e '.[web]'")
 
 SPEC = """# TaskBoard - Project Specification
 
@@ -64,7 +67,7 @@ def main() -> int:
     assert r.status_code == 200, r.text
     print("upload:", r.json()["chars"], "chars")
 
-    r = client.post("/api/config", json={"llm": {"provider": "free"}})
+    r = client.post("/api/config", json={"llm": {"provider": "auto"}})
     assert r.status_code == 200, r.text
 
     r = client.post("/api/plan", json={"days": 3})

@@ -14,7 +14,7 @@ from gitdrip.config import GitdripError, gitdrip_dir
 PRESETS: dict[str, tuple[str, str]] = {
     "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
     "anthropic": ("https://api.anthropic.com/v1", "claude-3-5-haiku-latest"),
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
     "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
     "openrouter": ("https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
     "free": ("https://text.pollinations.ai/openai", "openai"),
@@ -125,7 +125,10 @@ class LLMClient:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
+                content = _content_of(data)
+                if content:
+                    return content
+                raise RuntimeError(f"empty content in reply: {json.dumps(data)[:300]}")
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:300]
                 last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
@@ -138,6 +141,25 @@ class LLMClient:
                 last_error = exc
             time.sleep(3 * (attempt + 1))
         raise last_error or RuntimeError("unknown LLM error")
+
+
+def _content_of(data: dict) -> str:
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"unexpected reply shape: {json.dumps(data)[:300]}") from exc
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict)]
+        joined = "".join(parts).strip()
+        if joined:
+            return joined
+    if message.get("refusal"):
+        raise RuntimeError(f"model refused: {message['refusal']}")
+    finish = data.get("choices", [{}])[0].get("finish_reason")
+    raise RuntimeError(f"no text content (finish_reason={finish})")
 
 
 def extract_json(text: str) -> dict:

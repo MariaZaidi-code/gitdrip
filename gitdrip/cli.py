@@ -166,11 +166,17 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
 def _cmd_plan(args: argparse.Namespace) -> int:
     from gitdrip.llm import client_for, load_secrets, load_settings
-    from gitdrip.plan import make_plan
+    from gitdrip.plan import make_plan, save_doc_snapshot
 
     project = find_project(args.project)
+    doc = None
+    if args.doc:
+        from gitdrip.docparse import extract_text
+
+        doc = extract_text(Path(args.doc))
+        save_doc_snapshot(project, doc)
     client = client_for(project, load_settings(project), load_secrets(project))
-    plan = make_plan(project, client, args.days)
+    plan = make_plan(project, client, args.days, doc=doc)
     print(f"plan ready: {plan['title']} ({len(plan['days'])} days, provider: {plan['provider']})")
     if plan.get("warning"):
         print(f"warning: {plan['warning']}")
@@ -292,6 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("plan", help="read the document and build the day-by-day plan")
     p.add_argument("days", type=int, help="number of days to spread the plan over")
+    p.add_argument("--doc", help="path to the project document (.md/.txt/.docx/.pdf)")
     p.add_argument("--project")
     p.set_defaults(func=_cmd_plan)
 

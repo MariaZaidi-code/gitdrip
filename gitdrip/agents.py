@@ -293,6 +293,7 @@ def run_day(project: Path, day: int | None = None, force: bool = False, cfg: Con
         "files": written,
         "provider": client.used or "none",
         "time": _now(),
+        **({"error": impl_error} if impl_error else {}),
     })
     save_state(project, state)
 
