@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gitdrip"
+version = "0.1.0"
+description = "Queue finished code and push it to GitHub in daily batches for consistent activity"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "MariaZaidi-code" }]
+keywords = ["git", "github", "automation", "activity", "scheduler"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.scripts]
+gitdrip = "gitdrip.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gitdrip*"]
